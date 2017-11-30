@@ -1,4 +1,6 @@
-"use strict"; 
+"use strict";
+const {runtime} = browser;
+
 function onClick(event) {
   if (!event.isTrusted || event.defaultPrevented || event.button != 0) {
     return;
@@ -10,32 +12,23 @@ function onClick(event) {
   }
 
   let node = event.target;
-  if (node instanceof HTMLBodyElement ||
-      node instanceof HTMLHtmlElement) {
+  if (node == document.body) {
     return;
   }
 
-  let link = null;
-  do {
-   if (node instanceof HTMLAnchorElement ||
-       node instanceof HTMLAreaElement ||
-       node instanceof SVGAElement) {
-     link = node;
-   }
-   else {
-     node = node.parentElement;
-     if (!node || node instanceof HTMLBodyElement) {
-       break;
-     }
-   }
+  for (; node != document.body; node = node.parentElement) {
+    if (node instanceof HTMLAnchorElement ||
+        node instanceof HTMLAreaElement ||
+        node instanceof SVGAElement) {
+      break;
+    }
   }
-  while (link == null);
 
-  if (!link || !link.hasAttribute("download")) {
+  if (node == document.body || !node.hasAttribute("download")) {
     return;
   }
 
-  let url = link.href;
+  let url = node.href;
   if (url) {
     // Handle SVG links:
     if (typeof url == "object" && url.animVal) {
@@ -44,11 +37,11 @@ function onClick(event) {
   }
 
   if (!url) {
-    let href = link.getAttribute("href") ||
-               link.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+    let href = node.getAttribute("href") ||
+               node.getAttributeNS("http://www.w3.org/1999/xlink", "href");
 
     if (href && /\S/.test(href)) {
-      url = new URL(href, link.baseURI).href;
+      url = new URL(href, node.baseURI).href;
     }
   }
 
@@ -56,7 +49,7 @@ function onClick(event) {
     return;
   }
 
-  let origin = link.origin;
+  let origin = node.origin;
   if (!origin) {
     origin = new URL(url).origin;
   }
@@ -68,14 +61,15 @@ function onClick(event) {
   event.stopPropagation();
   event.preventDefault();
 
-  browser.runtime.sendMessage({
-    url,
-    "filename": link.download.trim()
-  }).then(() => {
-    window.location.href = url;
+  let download = node.download.trim();
+  let sending = runtime.sendMessage({url, download});
+  sending.then((message = {}) => {
+    if (message.ok == true) {
+      window.location.href = url;
+    }
   }).catch(error => {
     console.error(error);
-    link.click();
+    node.click();
   });
 }
 

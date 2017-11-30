@@ -3,18 +3,24 @@ const {runtime, webRequest} = browser;
 
 const APPLICATION_PDF = "application/pdf";
 
-// https://www.npmjs.com/package/base64-regex
-const BASE64_REGEXP = /(?:[A-Za-z0-9+\/]{4})*(?:[A-Za-z0-9+\/]{2}==|[A-Za-z0-9+\/]{3}=)/;
+const HEX_ESCAPE_REGEXP = /%[0-9A-Fa-f]{2}/;
 
-// https://stackoverflow.com/questions/23054475/javascript-regex-for-extracting-filename-from-content-disposition-header/23054920
-const FILENAME_REGEXP = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/i;
+const BASE64_REGEXP = /(?:[a-z0-9+\/]{4})*(?:[a-z0-9+\/]{2}==|[a-z0-9+\/]{3}=)/i;
+
+const SEPARATOR_REGEXP = /(?:;|,)/;
+
+if (!String.prototype.trimAll) {
+  String.prototype.trimAll = function () {
+    return this.replace(/[\s\uFEFF\xA0]+/g, ''); // taken from https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/Trim
+  };
+}
 
 let filenames = new Map();
 
 let myListener = {
   events: ["onCompleted", "onErrorOccurred", "onBeforeRedirect"],
 
-  addListeners(filter) {
+  add(filter) {
     this.callback = this.check.bind(this);
 
     for (let event of this.events) {
@@ -22,7 +28,7 @@ let myListener = {
     }
   },
 
-  removeListeners() {
+  remove() {
     for (let event of this.events) {
       if (webRequest[event].hasListener(this.callback)) {
         webRequest[event].removeListener(this.callback);
@@ -32,42 +38,41 @@ let myListener = {
   },
 
   check(details) {
+    this.remove();
+
     if (filenames.has(details.url)) {
+      let filename = filenames.get(details.url);
       if (details.redirectUrl) {
-        filenames.set(details.redirectUrl, filenames.get(details.url));
+        filenames.set(details.redirectUrl, filename);
+
+        this.add({
+          urls: [details.redirectUrl],
+          tabId: details.tabId,
+        });
       }
       filenames.delete(details.url);
-    }
-    this.removeListeners();
-
-    if (details.redirectUrl) {
-      this.addListeners({
-        urls: [details.redirectUrl],
-        tabId: details.tabId
-      });
     }
   },
 };
 
-runtime.onMessage.addListener((message, sender) => {
-  if (sender.id != "{b434be68-4cab-41e0-9141-9f8d00373d93}") {
+function handleMessage(request, sender, sendResponse) {
+  if (!sender.tab || sender.id != runtime.id) {
     return;
   }
 
-  if (!sender.tab) {
-    return;
-  }
-
-  let url = message.url;
+  let url = request.url;
   if (!filenames.has(url)) {
-    filenames.set(url, message.filename);
+    filenames.set(url, request.download);
 
-    myListener.addListeners({
+    myListener.add({
       urls: [url],
-      tabId: sender.tab.id
+      tabId: sender.tab.id,
     });
+    sendResponse({ok: true});
   }
-});
+}
+
+runtime.onMessage.addListener(handleMessage);
 
 function processHeaders(details) {
   if (details.method !== "GET" ||
@@ -91,8 +96,6 @@ function processHeaders(details) {
   let filename = "", isAttachment = false;
   if (filenames.has(details.url)) {
     filename = filenames.get(details.url);
-    filenames.delete(details.url);
-
     if (filename != "") {
       contentDispositionHeader = {
         name: "content-disposition",
@@ -111,46 +114,40 @@ function processHeaders(details) {
 
   let contentDisposition;
   if (contentDispositionHeader != null &&
-      typeof contentDispositionHeader.value == "string") {
+      contentDispositionHeader.value != null) {
     contentDisposition = contentDispositionHeader.value;
   }
 
   if (!filename && typeof contentDisposition == "string" &&
       contentDisposition.toLowerCase().includes("filename")) {
-    let m = FILENAME_REGEXP.exec(contentDisposition);
-    if (m != null && m.length > 1) {
-      if (m[0].toLowerCase().startsWith("filename*")) {
-        filename = m[1].replace(/^.+'.*'/, "");
-        try {
-          filename = decodeURIComponent(filename);
+    let matches = /(?:^|;)\s*filename([=\*]*)\s*=\s*((\\?['"])(.*?)\3|[^;\n]*)/i.exec(contentDisposition);
+    if (matches != null) {
+      filename = matches.filter(m => m != null).pop().trim();
+      if (filename != "") {
+        if (matches[1]) {
+          filename = filename.replace(/^[^']+'[^']*'/, '');
         }
-        catch (ex) {
-        }
-      }
-      else {
-        if (/%[0-9A-Fa-f]{2}/.test(m[1])) {
+        if (HEX_ESCAPE_REGEXP.test(filename)) {
+          let parm = `filename*=utf-8''${filename}`;
           try {
-            filename = decodeURIComponent(m[1]);
+            filename = decodeURIComponent(filename);
           }
           catch (ex) {
-            filename = m[1];
+            parm = `filename*=iso-8859-1''${filename}`;
           }
-        }
-        else {
-          filename = m[1].replace(/^\s*\\?['"]?/, "").replace(/\\?['"]?\s*$/, "");
-        }
-
-        if (filename != "") {
-          if (/\s/.test(filename) && (!m[2] || m[2] != "\"")) {
-            // fix firefox bug :(
-            // https://bugzilla.mozilla.org/show_bug.cgi?id=221028
-            contentDisposition = contentDisposition.replace(m[1], `"${filename}"`);
+          if (matches[1] != "*") {
+            contentDisposition = contentDisposition.replace(matches[0], parm);
             contentDispositionHeader.value = contentDisposition;
           }
-
-          if (BASE64_REGEXP.test(filename)) {
-            filename = atob(BASE64_REGEXP.exec(filename)[0]);
-          }
+        }
+        else if (/\s/.test(filename) && (!matches[3] || matches[3] != "\"")) {
+          // fix firefox bug :(
+          // https://bugzilla.mozilla.org/show_bug.cgi?id=221028
+          contentDisposition = contentDisposition.replace(matches[2], `"${filename}"`);
+          contentDispositionHeader.value = contentDisposition;
+        }
+        else if (BASE64_REGEXP.test(filename)) {
+          filename = atob(BASE64_REGEXP.exec(filename)[0]);
         }
       }
     }
@@ -158,20 +155,18 @@ function processHeaders(details) {
 
   let contentType;
   if (contentTypeHeader != null &&
-      typeof contentTypeHeader.value == "string" &&
-      contentTypeHeader.value != "") {
+      contentTypeHeader.value != null) {
     contentType = contentTypeHeader.value;
   }
 
-  let originalType = contentType || "";
-  if (typeof contentType == "string" &&
-      contentType != APPLICATION_PDF) {
-    if (contentType.includes(";")) {
-      contentType = contentType.split(";", 1)[0];
+  if (contentType != APPLICATION_PDF &&
+      typeof contentType == "string") {
+    if (SEPARATOR_REGEXP.test(contentType)) {
+      contentType = contentType.split(SEPARATOR_REGEXP, 1)[0];
     }
-    contentType = contentType.replace(/ /g, "").toLowerCase();
+    contentType = contentType.trimAll().toLowerCase();
     if (contentType != APPLICATION_PDF &&
-        /^(?:app[acilnot]+\/)?(?:x-)?pdf$/.test(contentType)) {
+        /^(?:app[a-z]+\\?\/)?(?:x-?)?pdf$/.test(contentType)) {
       contentType = APPLICATION_PDF;
     }
   }
@@ -184,7 +179,7 @@ function processHeaders(details) {
 
   if (contentType != APPLICATION_PDF &&
       contentType != "text/html" &&
-      /^[^?#;]+\.pdfx?(?=$|[#?;])/i.test(details.url)) {
+      /^[^?#;]+\.pdfx?(?=$|[?#;])/i.test(details.url)) {
     contentType = APPLICATION_PDF;
   }
 
@@ -197,16 +192,16 @@ function processHeaders(details) {
     return;
   }
 
-  if (originalType != contentType) {
-    if (contentTypeHeader != null) {
+  if (contentTypeHeader != null) {
+    if (contentTypeHeader.value != contentType) {
       contentTypeHeader.value = contentType;
     }
-    else {
-      details.responseHeaders.push({
-        name: "content-type",
-        value: contentType
-      });
-    }
+  }
+  else {
+    details.responseHeaders.push({
+      name: "content-type",
+      value: contentType
+    });
   }
 
   if (contentDispositionHeader != null) {
