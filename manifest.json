@@ -2,12 +2,12 @@
   "description": "Allows you to preview most pdf files with the pdf reader.",
   "manifest_version": 2,
   "name": "Always Preview",
-  "version": "1.8.6",
+  "version": "1.8.7",
 
   "applications": {
     "gecko": {
       "id": "{b434be68-4cab-41e0-9141-9f8d00373d93}",
-      "strict_min_version": "54.0"
+      "strict_min_version": "57.0"
     }
   },
 
